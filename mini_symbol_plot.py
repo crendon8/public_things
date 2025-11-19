@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 
 from mini_fake_data import SESSION_END, SESSION_START, make_fake_frames
 
-COLOR_MAP = dict(bid="#1f77b4", ask="#d62728", fill="#4b5563")
+COLOR_MAP = dict(bid="#1f77b4", ask="#d62728", fill="#4b5563", mid="#000000")
 
 
 def concat_feather_by_date(root: str | Path, relative: str = "output.fth") -> pd.DataFrame:
