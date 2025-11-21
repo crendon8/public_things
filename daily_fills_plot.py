@@ -4,7 +4,7 @@ Utilities for generating fake daily fills data and plotting them with Plotly.
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -12,6 +12,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 DEFAULT_NAMES: Sequence[str] = ("ABC", "DEF", "XYZ")
+
+GroupSpec = Mapping[str, Sequence[tuple[str, str]] | str]
 
 
 def create_fake_daily_frame(
@@ -37,15 +39,61 @@ def create_fake_daily_frame(
     sim_fills = rng.integers(sim_low, sim_high, size=len(names))
     prod_fills = sim_fills + rng.normal(prod_noise_mean, prod_noise_sd, size=len(names))
     pct_diff = (prod_fills - sim_fills) / sim_fills * 100
+
+    # Further break down into buy/sell with small noise and handle pct diffs safely.
+    sim_buy_fills = np.round(sim_fills * rng.uniform(0.4, 0.6, size=len(names))).astype(int)
+    sim_sell_fills = (sim_fills - sim_buy_fills).astype(int)
+    prod_buy_fills = np.round(sim_buy_fills + rng.normal(0, 5, size=len(names))).astype(int)
+    prod_sell_fills = np.round(sim_sell_fills + rng.normal(0, 5, size=len(names))).astype(int)
+    # Counts-related metrics
+    sim_buys = rng.integers(40, 90, size=len(names))
+    sim_sells = rng.integers(40, 90, size=len(names))
+    prod_buys = sim_buys + rng.normal(0, 8, size=len(names))
+    prod_sells = sim_sells + rng.normal(0, 8, size=len(names))
+    # Price-based metrics
+    sim_buy_px = rng.normal(100, 5, size=len(names))
+    sim_sell_px = rng.normal(101, 5, size=len(names))
+    prod_buy_px = sim_buy_px + rng.normal(0, 0.5, size=len(names))
+    prod_sell_px = sim_sell_px + rng.normal(0, 0.5, size=len(names))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        total_buy_pct_diff = np.where(
+            sim_buy_fills == 0, np.nan, (prod_buy_fills - sim_buy_fills) / sim_buy_fills * 100
+        )
+        total_sell_pct_diff = np.where(
+            sim_sell_fills == 0, np.nan, (prod_sell_fills - sim_sell_fills) / sim_sell_fills * 100
+        )
+        ct_buy_pct = np.where(sim_buys == 0, np.nan, (prod_buys - sim_buys) / sim_buys * 100)
+        ct_sell_ct = np.where(sim_sells == 0, np.nan, (prod_sells - sim_sells) / sim_sells * 100)
+        buy_bps_diff = np.where(sim_buy_px == 0, np.nan, (prod_buy_px - sim_buy_px) / sim_buy_px * 10_000)
+        sell_bps_diff = np.where(sim_sell_px == 0, np.nan, (prod_sell_px - sim_sell_px) / sim_sell_px * 10_000)
+
     df = pd.DataFrame(
         {
             "sim_fills": sim_fills.astype(int),
             "prod_fills": prod_fills.round(2),
             "pct_diff": pct_diff.round(2),
+            "sim_buy_fills": sim_buy_fills,
+            "sim_sell_fills": sim_sell_fills,
+            "prod_buy_fills": prod_buy_fills,
+            "prod_sell_fills": prod_sell_fills,
+            "total_buy_pct_diff": np.round(total_buy_pct_diff, 2),
+            "total_sell_pct_diff": np.round(total_sell_pct_diff, 2),
+            "sim_buys": sim_buys.astype(int),
+            "sim_sells": sim_sells.astype(int),
+            "prod_buys": prod_buys.round(2),
+            "prod_sells": prod_sells.round(2),
+            "ct_buy_pct": np.round(ct_buy_pct, 2),
+            "ct_sell_ct": np.round(ct_sell_ct, 2),
+            "sim_buy_px": sim_buy_px.round(4),
+            "sim_sell_px": sim_sell_px.round(4),
+            "prod_buy_px": prod_buy_px.round(4),
+            "prod_sell_px": prod_sell_px.round(4),
+            "buy_bps_diff": np.round(buy_bps_diff, 2),
+            "sell_bps_diff": np.round(sell_bps_diff, 2),
         },
         index=names,
     )
-    df.index.name = "name"
+    df.index.name = "symbol"
     return df
 
 
@@ -63,7 +111,7 @@ def generate_fake_daily_frames(
     """
     Create reproducible per-day dataframes (no date column) alongside the dates used.
 
-    Returns dates, frames where each frame has index=name and sim/prod/pct_diff columns.
+    Each frame has index=symbol and columns for totals, buy/sell breakdown, count-based metrics, and price-based metrics.
     """
     rng = np.random.default_rng(seed)
     dates = pd.date_range(start, periods=periods, freq=freq)
@@ -100,46 +148,87 @@ def concat_daily_frames(frames: Iterable[pd.DataFrame], dates: Iterable[pd.Times
     return pd.concat(prepared, ignore_index=True)
 
 
-def plot_fills(df: pd.DataFrame, name: str) -> go.Figure:
+def plot_fills(df: pd.DataFrame, group: GroupSpec, add_dropdown: bool = True) -> go.Figure:
     """
-    Plot sim vs production fills over time with pct_diff on a secondary axis.
+    Plot series using the provided group definition with a dropdown to toggle symbols.
+
+    `group` should provide "primary" and/or "secondary" lists of (column, label) tuples.
+    Optionally include a "title" string (supports {symbol} formatting).
+    When add_dropdown is True, include a symbol selector to toggle visibility.
     """
-    subset = df[df["name"] == name].sort_values("date")
-    if subset.empty:
-        raise ValueError(f"No rows found for name {name}")
+    symbols = sorted(df["symbol"].unique())
+    if not symbols:
+        raise ValueError("No symbols found in dataframe")
+    initial_symbol = symbols[0]
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(
-        go.Scatter(
-            x=subset["date"],
-            y=subset["sim_fills"],
-            name="sim_fills",
-            mode="lines+markers",
+    primaries = list(group.get("primary", []))
+    secondaries = list(group.get("secondary", []))
+    traces_per_symbol = len(primaries) + len(secondaries)
+
+    for sym_idx, sym in enumerate(symbols):
+        subset = df[df["symbol"] == sym].sort_values("date")
+        if subset.empty:
+            continue
+        visible = sym == initial_symbol
+        for col, label in primaries:
+            fig.add_trace(
+                go.Scatter(
+                    x=subset["date"],
+                    y=subset[col],
+                    name=label,
+                    mode="lines+markers",
+                    visible=visible,
+                )
+            )
+        for col, label in secondaries:
+            fig.add_trace(
+                go.Scatter(
+                    x=subset["date"],
+                    y=subset[col],
+                    name=label,
+                    mode="lines+markers",
+                    visible=visible,
+                ),
+                secondary_y=True,
+            )
+
+    if add_dropdown and len(symbols) > 1 and traces_per_symbol > 0:
+        buttons = []
+        total_traces = traces_per_symbol * len(symbols)
+        for idx, sym in enumerate(symbols):
+            visibility = [False] * total_traces
+            start = idx * traces_per_symbol
+            for j in range(traces_per_symbol):
+                visibility[start + j] = True
+            buttons.append(
+                dict(
+                    label=str(sym),
+                    method="update",
+                    args=[
+                        {"visible": visibility},
+                        {"title": (group.get("title") or f"Series for {sym}").format(symbol=sym)},
+                    ],
+                )
+            )
+        fig.update_layout(
+            updatemenus=[
+                dict(
+                    buttons=buttons,
+                    direction="down",
+                    x=0,
+                    xanchor="left",
+                    y=1.15,
+                    yanchor="top",
+                )
+            ]
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=subset["date"],
-            y=subset["prod_fills"],
-            name="prod_fills",
-            mode="lines+markers",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=subset["date"],
-            y=subset["pct_diff"],
-            name="pct_diff (%)",
-            mode="lines+markers",
-            line=dict(dash="dot"),
-        ),
-        secondary_y=True,
-    )
 
     fig.update_layout(
-        title=f"Sim vs Prod fills for {name}",
+        title=(group.get("title") or f"Series for {initial_symbol}").format(symbol=initial_symbol),
         hovermode="x unified",
         legend_title="Series",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
     )
     fig.update_xaxes(title_text="Date")
     fig.update_yaxes(title_text="Fills", secondary_y=False)
@@ -147,4 +236,10 @@ def plot_fills(df: pd.DataFrame, name: str) -> go.Figure:
     return fig
 
 
-__all__ = ["create_fake_daily_frame", "generate_fake_daily_frames", "concat_daily_frames", "plot_fills"]
+__all__ = [
+    "create_fake_daily_frame",
+    "generate_fake_daily_frames",
+    "concat_daily_frames",
+    "plot_fills",
+    "GroupSpec",
+]

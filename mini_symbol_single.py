@@ -48,11 +48,21 @@ def plot_single_symbol(
     session_start: Optional[str] = None,
     session_end: Optional[str] = None,
     market_series: Optional[Sequence[dict]] = None,
+    tz: str = "America/Chicago",
 ) -> go.Figure:
     market_df = market_df.sort_values("ReceivedTime").copy()
     fills_df = fills_df.sort_values("rxTime").copy()
     market_df["ReceivedTime"] = _ensure_datetime(market_df["ReceivedTime"])
     fills_df["rxTime"] = _ensure_datetime(fills_df["rxTime"])
+
+    def _convert_to_tz(series: pd.Series) -> pd.Series:
+        try:
+            return series.dt.tz_localize("UTC").dt.tz_convert(tz)
+        except TypeError:
+            return series.dt.tz_convert(tz)
+
+    market_df["ReceivedTime"] = _convert_to_tz(market_df["ReceivedTime"])
+    fills_df["rxTime"] = _convert_to_tz(fills_df["rxTime"])
     times = market_df["ReceivedTime"]
 
     def _parse_time(value: Optional[str]) -> Optional[pd.Timedelta]:
@@ -153,11 +163,12 @@ def main(
     end: Optional[str] = None,
     output: Optional[str] = None,
     market_series: Optional[Sequence[dict]] = None,
+    tz: str = "America/Chicago",
 ) -> Path:
     fills_df, market_df = make_fake_frames()
     if market_series is None:
         raise ValueError("market_series must be provided when running main()")
-    fig = plot_single_symbol(fills_df, market_df, symbol, start, end, market_series=market_series)
+    fig = plot_single_symbol(fills_df, market_df, symbol, start, end, market_series=market_series, tz=tz)
     if output is None:
         fig.show()
         return Path(".")
@@ -180,10 +191,11 @@ if __name__ == "__main__":
         help="JSON string describing bid/ask columns, e.g. "
         "'[{\"label\":\"NYSE px0\",\"bid\":\"NYSE.ABC_bid\",\"ask\":\"NYSE.ABC_ask\"}]'",
     )
+    parser.add_argument("--tz", default="America/Chicago", help="Timezone for interpreting session start/end (default: America/Chicago)")
     args = parser.parse_args()
     import json
 
     market_series = json.loads(args.market_series)
-    path = main(args.symbol, args.start, args.end, args.output, market_series=market_series)
+    path = main(args.symbol, args.start, args.end, args.output, market_series=market_series, tz=args.tz)
     if args.output:
         print(f"Wrote plot to {path}")
