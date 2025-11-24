@@ -37,6 +37,57 @@ def _hour_fraction(text: str) -> float:
     return h + m / 60 + s / 3600
 
 
+def attach_buy_sell(
+    fills_df: pd.DataFrame,
+    market_df: pd.DataFrame,
+    *,
+    prefix: str = "",
+    buy_suffix: str = "_bid",
+    sell_suffix: str = "_ask",
+    fill_time_col: str = "rxTime",
+    market_time_col: str = "ReceivedTime",
+    symbol_col: str = "symbol",
+    buy_col_name: str = "buy",
+    sell_col_name: str = "sell",
+) -> pd.DataFrame:
+    """
+    Align fills_df and market_df on timestamp + symbol and pull sided prices into fills_df.
+
+    Time columns are coerced with pd.to_datetime so they can be ns integers or datetimes.
+    Market columns are expected to follow the pattern "{prefix}{symbol}{buy_suffix}" and
+    "{prefix}{symbol}{sell_suffix}".
+    """
+    fills = fills_df.copy()
+    fills["_time_key"] = pd.to_datetime(fills[fill_time_col])
+
+    market = market_df.copy()
+    market["_time_key"] = pd.to_datetime(market[market_time_col])
+    market_indexed = market.set_index("_time_key")
+
+    symbols = pd.unique(fills[symbol_col])
+    missing = []
+    for sym in symbols:
+        buy_col = f"{prefix}{sym}{buy_suffix}"
+        sell_col = f"{prefix}{sym}{sell_suffix}"
+        for col in (buy_col, sell_col):
+            if col not in market_indexed.columns:
+                missing.append(col)
+    if missing:
+        raise ValueError(f"Missing columns in market_df: {missing}")
+
+    for sym in symbols:
+        buy_col = f"{prefix}{sym}{buy_suffix}"
+        sell_col = f"{prefix}{sym}{sell_suffix}"
+        mask = fills[symbol_col] == sym
+        times = fills.loc[mask, "_time_key"]
+        aligned = market_indexed.reindex(times)
+        # reindex preserves the fills order so assignments line up.
+        fills.loc[mask, buy_col_name] = aligned[buy_col].to_numpy()
+        fills.loc[mask, sell_col_name] = aligned[sell_col].to_numpy()
+
+    return fills.drop(columns="_time_key")
+
+
 def plot_market(fills_df: pd.DataFrame, market_df: pd.DataFrame) -> go.Figure:
     market_df = market_df.sort_values("ReceivedTime").copy()
     fills_df = fills_df.sort_values("rxTime").copy()
