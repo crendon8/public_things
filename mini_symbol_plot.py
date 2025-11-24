@@ -49,20 +49,22 @@ def attach_buy_sell(
     symbol_col: str = "symbol",
     buy_col_name: str = "buy",
     sell_col_name: str = "sell",
+    time_diff_col_name: str = "time_diff",
 ) -> pd.DataFrame:
     """
-    Align fills_df and market_df on timestamp + symbol and pull sided prices into fills_df.
+    Align fills_df and market_df on timestamp + symbol (nearest neighbor) and pull sided prices into fills_df.
 
     Time columns are coerced with pd.to_datetime so they can be ns integers or datetimes.
     Market columns are expected to follow the pattern "{prefix}{symbol}{buy_suffix}" and
-    "{prefix}{symbol}{sell_suffix}".
+    "{prefix}{symbol}{sell_suffix}". The nearest market timestamp is used per fill, and
+    the absolute time delta (ns) is stored in *time_diff_col_name*.
     """
     fills = fills_df.copy()
     fills["_time_key"] = pd.to_datetime(fills[fill_time_col])
+    fills["_fill_idx"] = fills.index
 
     market = market_df.copy()
     market["_time_key"] = pd.to_datetime(market[market_time_col])
-    market_indexed = market.set_index("_time_key")
 
     symbols = pd.unique(fills[symbol_col])
     missing = []
@@ -70,7 +72,7 @@ def attach_buy_sell(
         buy_col = f"{prefix}{sym}{buy_suffix}"
         sell_col = f"{prefix}{sym}{sell_suffix}"
         for col in (buy_col, sell_col):
-            if col not in market_indexed.columns:
+            if col not in market.columns:
                 missing.append(col)
     if missing:
         raise ValueError(f"Missing columns in market_df: {missing}")
@@ -79,13 +81,27 @@ def attach_buy_sell(
         buy_col = f"{prefix}{sym}{buy_suffix}"
         sell_col = f"{prefix}{sym}{sell_suffix}"
         mask = fills[symbol_col] == sym
-        times = fills.loc[mask, "_time_key"]
-        aligned = market_indexed.reindex(times)
-        # reindex preserves the fills order so assignments line up.
-        fills.loc[mask, buy_col_name] = aligned[buy_col].to_numpy()
-        fills.loc[mask, sell_col_name] = aligned[sell_col].to_numpy()
+        market_sym = (
+            market[["_time_key", buy_col, sell_col]]
+            .rename(columns={"_time_key": "_market_time"})
+            .sort_values("_market_time")
+        )
+        fills_sym = fills.loc[mask, ["_fill_idx", "_time_key"]].sort_values("_time_key")
+        aligned = pd.merge_asof(
+            fills_sym,
+            market_sym,
+            left_on="_time_key",
+            right_on="_market_time",
+            direction="nearest",
+        )
+        delta = (aligned["_market_time"] - aligned["_time_key"]).abs()
+        aligned[time_diff_col_name] = delta.astype("int64")  # nanoseconds
+        target_idx = aligned["_fill_idx"].to_numpy()
+        fills.loc[target_idx, buy_col_name] = aligned[buy_col].to_numpy()
+        fills.loc[target_idx, sell_col_name] = aligned[sell_col].to_numpy()
+        fills.loc[target_idx, time_diff_col_name] = aligned[time_diff_col_name].to_numpy()
 
-    return fills.drop(columns="_time_key")
+    return fills.drop(columns=["_time_key", "_fill_idx"])
 
 
 def plot_market(fills_df: pd.DataFrame, market_df: pd.DataFrame) -> go.Figure:
