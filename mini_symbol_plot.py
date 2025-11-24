@@ -51,6 +51,10 @@ def attach_buy_sell(
     buy_col_name: str = "buy",
     sell_col_name: str = "sell",
     time_diff_col_name: str = "time_diff",
+    mid_suffix: str = "_mid",
+    mid_col_name: str = "mid",
+    fill_prem_col_name: str = "fill_prem",
+    order_price_col: str | None = None,
     symbol_mask: Sequence[str] | None = ("ABC", "DEF"),
 ) -> pd.DataFrame:
     """
@@ -58,16 +62,27 @@ def attach_buy_sell(
 
     Time columns are coerced with pd.to_datetime so they can be ns integers or datetimes.
     Market columns are expected to follow the pattern "{prefix}{symbol}{buy_suffix}" and
-    "{prefix}{symbol}{sell_suffix}". The nearest market timestamp is used per fill, and
-    the absolute time delta (ns) is stored in *time_diff_col_name*.
+    "{prefix}{symbol}{sell_suffix}" and "{prefix}{symbol}{mid_suffix}". The nearest market timestamp is used
+    per fill, the absolute time delta (ns) is stored in *time_diff_col_name*, and the midpoint is used to
+    compute a fill premium (bps): (OrderPrice / mid - 1) * 1e4.
     """
     fills = fills_df.copy()
     fills["_time_key"] = pd.to_datetime(fills[fill_time_col])
     fills["_fill_idx"] = fills.index
     fills["_fill_pos"] = range(len(fills))  # positional index to avoid duplicate label issues
-    for col in (buy_col_name, sell_col_name, time_diff_col_name):
+    for col in (buy_col_name, sell_col_name, time_diff_col_name, mid_col_name, fill_prem_col_name):
         if col not in fills.columns:
             fills[col] = pd.NA
+
+    if order_price_col is None:
+        if "OrderPrice" in fills.columns:
+            order_price_col = "OrderPrice"
+        elif "price" in fills.columns:
+            order_price_col = "price"
+        else:
+            raise ValueError("order_price_col not provided and neither 'OrderPrice' nor 'price' found in fills_df.")
+    elif order_price_col not in fills.columns:
+        raise ValueError(f"order_price_col '{order_price_col}' not found in fills_df.")
 
     market = market_df.copy()
     market["_time_key"] = pd.to_datetime(market[market_time_col])
@@ -79,7 +94,8 @@ def attach_buy_sell(
     for sym in symbols:
         buy_col = f"{prefix}{sym}{buy_suffix}"
         sell_col = f"{prefix}{sym}{sell_suffix}"
-        for col in (buy_col, sell_col):
+        mid_col = f"{prefix}{sym}{mid_suffix}"
+        for col in (buy_col, sell_col, mid_col):
             if col not in market.columns:
                 missing.append(col)
     if missing:
@@ -88,11 +104,12 @@ def attach_buy_sell(
     for sym in symbols:
         buy_col = f"{prefix}{sym}{buy_suffix}"
         sell_col = f"{prefix}{sym}{sell_suffix}"
+        mid_col = f"{prefix}{sym}{mid_suffix}"
         mask = fills[symbol_col] == sym
         fill_positions = fills.loc[mask, "_fill_pos"].to_numpy()
         fill_indices = fills.loc[mask, "_fill_idx"]
         market_sym = (
-            market[["_time_key", buy_col, sell_col]]
+            market[["_time_key", buy_col, sell_col, mid_col]]
             .rename(columns={"_time_key": "_market_time"})
             .sort_values("_market_time")
         )
@@ -107,8 +124,13 @@ def attach_buy_sell(
         delta = (aligned["_market_time"] - aligned["_time_key"]).abs()
         aligned[time_diff_col_name] = delta.astype("int64")  # nanoseconds
         aligned = aligned.set_index("_fill_idx").reindex(fill_indices)
+        mid_values = aligned[mid_col].to_numpy()
         fills.iloc[fill_positions, fills.columns.get_loc(buy_col_name)] = aligned[buy_col].to_numpy()
         fills.iloc[fill_positions, fills.columns.get_loc(sell_col_name)] = aligned[sell_col].to_numpy()
+        fills.iloc[fill_positions, fills.columns.get_loc(mid_col_name)] = mid_values
+        price_values = pd.to_numeric(fills.iloc[fill_positions][order_price_col], errors="coerce").to_numpy()
+        prem = (price_values / mid_values - 1.0) * 1e4
+        fills.iloc[fill_positions, fills.columns.get_loc(fill_prem_col_name)] = prem
         fills.iloc[fill_positions, fills.columns.get_loc(time_diff_col_name)] = aligned[time_diff_col_name].to_numpy()
 
     return fills.drop(columns=["_time_key", "_fill_idx", "_fill_pos"])
