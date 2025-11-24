@@ -5,6 +5,7 @@ Reduced multi-day market plotter with dropdown symbol switching.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Sequence
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -50,6 +51,7 @@ def attach_buy_sell(
     buy_col_name: str = "buy",
     sell_col_name: str = "sell",
     time_diff_col_name: str = "time_diff",
+    symbol_mask: Sequence[str] | None = ("ABC", "DEF"),
 ) -> pd.DataFrame:
     """
     Align fills_df and market_df on timestamp + symbol (nearest neighbor) and pull sided prices into fills_df.
@@ -62,11 +64,17 @@ def attach_buy_sell(
     fills = fills_df.copy()
     fills["_time_key"] = pd.to_datetime(fills[fill_time_col])
     fills["_fill_idx"] = fills.index
+    fills["_fill_pos"] = range(len(fills))  # positional index to avoid duplicate label issues
+    for col in (buy_col_name, sell_col_name, time_diff_col_name):
+        if col not in fills.columns:
+            fills[col] = pd.NA
 
     market = market_df.copy()
     market["_time_key"] = pd.to_datetime(market[market_time_col])
 
-    symbols = pd.unique(fills[symbol_col])
+    symbols = pd.unique(fills[symbol_col]).tolist()
+    if symbol_mask is not None:
+        symbols = [sym for sym in symbols if sym in symbol_mask]
     missing = []
     for sym in symbols:
         buy_col = f"{prefix}{sym}{buy_suffix}"
@@ -81,6 +89,8 @@ def attach_buy_sell(
         buy_col = f"{prefix}{sym}{buy_suffix}"
         sell_col = f"{prefix}{sym}{sell_suffix}"
         mask = fills[symbol_col] == sym
+        fill_positions = fills.loc[mask, "_fill_pos"].to_numpy()
+        fill_indices = fills.loc[mask, "_fill_idx"]
         market_sym = (
             market[["_time_key", buy_col, sell_col]]
             .rename(columns={"_time_key": "_market_time"})
@@ -96,12 +106,12 @@ def attach_buy_sell(
         )
         delta = (aligned["_market_time"] - aligned["_time_key"]).abs()
         aligned[time_diff_col_name] = delta.astype("int64")  # nanoseconds
-        target_idx = aligned["_fill_idx"].to_numpy()
-        fills.loc[target_idx, buy_col_name] = aligned[buy_col].to_numpy()
-        fills.loc[target_idx, sell_col_name] = aligned[sell_col].to_numpy()
-        fills.loc[target_idx, time_diff_col_name] = aligned[time_diff_col_name].to_numpy()
+        aligned = aligned.set_index("_fill_idx").reindex(fill_indices)
+        fills.iloc[fill_positions, fills.columns.get_loc(buy_col_name)] = aligned[buy_col].to_numpy()
+        fills.iloc[fill_positions, fills.columns.get_loc(sell_col_name)] = aligned[sell_col].to_numpy()
+        fills.iloc[fill_positions, fills.columns.get_loc(time_diff_col_name)] = aligned[time_diff_col_name].to_numpy()
 
-    return fills.drop(columns=["_time_key", "_fill_idx"])
+    return fills.drop(columns=["_time_key", "_fill_idx", "_fill_pos"])
 
 
 def plot_market(fills_df: pd.DataFrame, market_df: pd.DataFrame) -> go.Figure:
