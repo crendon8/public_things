@@ -4,7 +4,7 @@ Utilities for generating fake daily fills data and plotting them with Plotly.
 
 from __future__ import annotations
 
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence, List
 
 import numpy as np
 import pandas as pd
@@ -146,52 +146,95 @@ def concat_daily_frames(frames: Iterable[pd.DataFrame], dates: Iterable[pd.Times
     return pd.concat(prepared, ignore_index=True)
 
 
-def plot_fills(df: pd.DataFrame, symbol: str, group: GroupSpec) -> go.Figure:
+def plot_fills(
+    df: pd.DataFrame,
+    group: GroupSpec,
+    add_dropdown: bool = True,
+    symbol_mask: List[str] = ["ABC", "DEF"],
+) -> go.Figure:
     """
-    Plot series for a given symbol using the provided group definition.
+    Plot series for available symbols using the provided group definition. A dropdown toggles symbols.
 
     `group` should provide "primary" and/or "secondary" lists of (column, label) tuples.
     Optionally include a "title" string (supports {symbol} formatting).
     """
-    subset = df[df["symbol"] == symbol].sort_values("date")
-    if subset.empty:
-        raise ValueError(f"No rows found for symbol {symbol}")
-    subset = subset.copy()
-    subset["date"] = pd.to_datetime(subset["date"])
+    symbols = sorted(df["symbol"].unique())
+    if symbol_mask:
+        symbols = [s for s in symbol_mask if s in symbols]
+    if not symbols:
+        raise ValueError("No symbols found in dataframe")
+    initial_symbol = symbols[0]
 
     primaries = list(group.get("primary", []))
     secondaries = list(group.get("secondary", []))
     required_cols = [col for col, _ in primaries] + [col for col, _ in secondaries]
-    missing = [col for col in required_cols if col not in subset.columns]
+    missing = [col for col in required_cols if col not in df.columns]
     if missing:
         raise KeyError(f"Missing columns for plotting: {missing}")
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    for col, label in primaries:
-        fig.add_trace(
-            go.Scatter(
-                x=subset["date"],
-                y=subset[col],
-                name=label,
-                mode="lines+markers",
+    traces_per_symbol = len(primaries) + len(secondaries)
+    for sym in symbols:
+        subset = df[df["symbol"] == sym].sort_values("date").copy()
+        subset["date"] = pd.to_datetime(subset["date"])
+        visible = sym == initial_symbol
+        for col, label in primaries:
+            fig.add_trace(
+                go.Scatter(
+                    x=subset["date"],
+                    y=subset[col],
+                    name=label,
+                    mode="lines+markers",
+                    visible=visible,
+                )
             )
-        )
-    for col, label in secondaries:
-        fig.add_trace(
-            go.Scatter(
-                x=subset["date"],
-                y=subset[col],
-                name=label,
-                mode="lines+markers",
-            ),
-            secondary_y=True,
+        for col, label in secondaries:
+            fig.add_trace(
+                go.Scatter(
+                    x=subset["date"],
+                    y=subset[col],
+                    name=label,
+                    mode="lines+markers",
+                    visible=visible,
+                ),
+                secondary_y=True,
+            )
+
+    if add_dropdown and traces_per_symbol > 0 and len(symbols) > 1:
+        total_traces = traces_per_symbol * len(symbols)
+        buttons = []
+        for idx, sym in enumerate(symbols):
+            visibility = [False] * total_traces
+            start = idx * traces_per_symbol
+            for j in range(traces_per_symbol):
+                visibility[start + j] = True
+            title = (group.get("title") or f"Series for {sym}").format(symbol=sym)
+            buttons.append(
+                dict(
+                    label=str(sym),
+                    method="update",
+                    args=[{"visible": visibility}, {"title": title}],
+                )
+            )
+        fig.update_layout(
+            updatemenus=[
+                dict(
+                    buttons=buttons,
+                    direction="down",
+                    x=1.0,
+                    xanchor="right",
+                    y=1.15,
+                    yanchor="top",
+                    showactive=True,
+                )
+            ]
         )
 
     primary_title = group.get("primary_title") or (primaries[0][1] if primaries else "Fills")
     secondary_title = group.get("secondary_title") or (secondaries[0][1] if secondaries else "Secondary")
 
     fig.update_layout(
-        title=(group.get("title") or f"Series for {symbol}").format(symbol=symbol),
+        title=(group.get("title") or f"Series for {initial_symbol}").format(symbol=initial_symbol),
         hovermode="x unified",
         legend_title="Series",
         legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
