@@ -99,6 +99,40 @@ def create_fake_daily_frame(
     return df
 
 
+def create_fake_pnl_frame(
+    date: pd.Timestamp | str | None = None,
+    names: Sequence[str] | None = None,
+    rng: np.random.Generator | None = None,
+    seed: int | None = None,
+    sim_mean: float = 0.0,
+    sim_sd: float = 5_000.0,
+    prod_noise_mean: float = 0.0,
+    prod_noise_sd: float = 1_500.0,
+) -> pd.DataFrame:
+    """
+    Build a single day's PnL dataframe with sim/prod pnl and pct_diff for each symbol.
+    """
+    names = DEFAULT_NAMES if names is None else list(names)
+    if rng is None:
+        if seed is None and date is not None:
+            seed = int(pd.to_datetime(date).value % (2**32))
+        rng = np.random.default_rng(seed)
+    sim_pnl = rng.normal(sim_mean, sim_sd, size=len(names))
+    prod_pnl = sim_pnl + rng.normal(prod_noise_mean, prod_noise_sd, size=len(names))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pct_diff = np.where(sim_pnl == 0, np.nan, (prod_pnl - sim_pnl) / np.abs(sim_pnl) * 100)
+    df = pd.DataFrame(
+        {
+            "sim_pnl": sim_pnl.round(2),
+            "prod_pnl": prod_pnl.round(2),
+            "pct_diff": np.round(pct_diff, 2),
+        },
+        index=names,
+    )
+    df.index.name = "symbol"
+    return df
+
+
 def generate_fake_daily_frames(
     start: str = "2024-01-01",
     periods: int = 14,
@@ -146,11 +180,11 @@ def concat_daily_frames(frames: Iterable[pd.DataFrame], dates: Iterable[pd.Times
     return pd.concat(prepared, ignore_index=True)
 
 
-def plot_fills(
+def plot_groups(
     df: pd.DataFrame,
     group: GroupSpec,
     add_dropdown: bool = True,
-    symbol_mask: List[str] = ["ABC", "DEF"],
+    symbol_mask: Sequence[str] | None = None,
 ) -> go.Figure:
     """
     Plot series for available symbols using the provided group definition. A dropdown toggles symbols.
@@ -159,8 +193,10 @@ def plot_fills(
     Optionally include a "title" string (supports {symbol} formatting).
     """
     symbols = sorted(df["symbol"].unique())
-    if symbol_mask:
-        symbols = [s for s in symbol_mask if s in symbols]
+    if symbol_mask is not None:
+        # An empty mask means no filtering; a non-empty mask limits to those names present.
+        if symbol_mask:
+            symbols = [s for s in symbols if s in symbol_mask]
     if not symbols:
         raise ValueError("No symbols found in dataframe")
     initial_symbol = symbols[0]
@@ -246,10 +282,12 @@ def plot_fills(
     return fig
 
 
+
 __all__ = [
     "create_fake_daily_frame",
+    "create_fake_pnl_frame",
     "generate_fake_daily_frames",
     "concat_daily_frames",
-    "plot_fills",
+    "plot_groups",
     "GroupSpec",
 ]
